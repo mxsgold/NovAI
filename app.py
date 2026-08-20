@@ -151,18 +151,6 @@ def webhook():
         # Финальное обновление с фолбэком на случай битого HTML
         final_resp = requests.post(
             f"{TELEGRAM_API_URL}/editMessageText",
-            json={
-                "chat_id": chat_id,
-                "message_id": message_id,
-                "text": format_for_telegram(full_text),
-                "parse_mode": "HTML"
-            }
-        )
-        if not final_resp.json().get("ok"):
-            requests.post(
-                f"{TELEGRAM_API_URL}/editMessageText",
-                json={"chat_id": chat_id, "message_id": message_id, "text": full_text}
-            )
 
     except Exception as e:
         send_telegram_message(chat_id, f"Произошла ошибка: {e}")
