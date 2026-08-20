@@ -42,16 +42,9 @@ def format_for_telegram(text):
     """Конвертирует базовый Markdown от Gemini в HTML-теги, понятные Telegram."""
     text = html.escape(text)
 
-    # Блоки кода ```...```
     text = re.sub(r"```(.*?)```", r"<pre>\1</pre>", text, flags=re.DOTALL)
-
-    # Инлайн-код `...`
     text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
-
-    # Жирный **...**
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
-
-    # Курсив *...* или _..._
     text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
     text = re.sub(r"_(.*?)_", r"<i>\1</i>", text)
 
@@ -90,7 +83,7 @@ def edit_telegram_message(chat_id, message_id, text):
             }
         )
     except Exception:
-        pass  # промежуточные ошибки парсинга во время стриминга игнорируем
+        pass
 
 
 def send_typing_action(chat_id):
@@ -129,7 +122,6 @@ def webhook():
         send_typing_action(chat_id)
         session = get_chat_session(chat_id)
 
-        # Заглушка, которую будем редактировать по мере генерации
         placeholder = send_telegram_message(chat_id, "…")
         message_id = placeholder["result"]["message_id"]
 
@@ -147,10 +139,6 @@ def webhook():
                 edit_telegram_message(chat_id, message_id, full_text)
                 last_edit_time = now
                 send_typing_action(chat_id)
-
-        # Финальное обновление с фолбэком на случай битого HTML
-        final_resp = requests.post(
-            f"{TELEGRAM_API_URL}/editMessageText",
 
     except Exception as e:
         send_telegram_message(chat_id, f"Произошла ошибка: {e}")
