@@ -1,4 +1,6 @@
 import os
+import re
+import html
 import time
 import requests
 from flask import Flask, request, jsonify
@@ -19,19 +21,41 @@ SYSTEM_PROMPT = """
 """
 
 GREETING_MESSAGE = "Привет! Я Ева, твой ИИ-помощник. Чем могу помочь?"
+
+# Имя модели — поставь то, что у тебя реально работает
+MODEL_NAME = "gemini-flash-latest"
 # =========================================================
 
-MODEL_NAME = "gemini-3.6-flash"  # поставь актуальное имя своей модели
+# Как часто редактировать сообщение во время стриминга (в секундах)
+EDIT_INTERVAL = 0.8
 
 model = genai.GenerativeModel(
     model_name=MODEL_NAME,
     system_instruction=SYSTEM_PROMPT
 )
 
+# История чатов по chat_id (в памяти — сбрасывается при рестарте сервиса)
 chats = {}
 
-# Как часто редактировать сообщение (в секундах). Меньше = плавнее, но выше риск упереться в лимиты Telegram.
-EDIT_INTERVAL = 0.8
+
+def format_for_telegram(text):
+    """Конвертирует базовый Markdown от Gemini в HTML-теги, понятные Telegram."""
+    text = html.escape(text)
+
+    # Блоки кода ```...```
+    text = re.sub(r"```(.*?)```", r"<pre>\1</pre>", text, flags=re.DOTALL)
+
+    # Инлайн-код `...`
+    text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
+
+    # Жирный **...**
+    text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
+
+    # Курсив *...* или _..._
+    text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
+    text = re.sub(r"_(.*?)_", r"<i>\1</i>", text)
+
+    return text
 
 
 def get_chat_session(chat_id):
@@ -43,7 +67,11 @@ def get_chat_session(chat_id):
 def send_telegram_message(chat_id, text):
     resp = requests.post(
         f"{TELEGRAM_API_URL}/sendMessage",
-        json={"chat_id": chat_id, "text": text}
+        json={
+            "chat_id": chat_id,
+            "text": format_for_telegram(text),
+            "parse_mode": "HTML"
+        }
     )
     return resp.json()
 
@@ -51,10 +79,18 @@ def send_telegram_message(chat_id, text):
 def edit_telegram_message(chat_id, message_id, text):
     if not text.strip():
         return
-    requests.post(
-        f"{TELEGRAM_API_URL}/editMessageText",
-        json={"chat_id": chat_id, "message_id": message_id, "text": text}
-    )
+    try:
+        requests.post(
+            f"{TELEGRAM_API_URL}/editMessageText",
+            json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": format_for_telegram(text),
+                "parse_mode": "HTML"
+            }
+        )
+    except Exception:
+        pass  # промежуточные ошибки парсинга во время стриминга игнорируем
 
 
 def send_typing_action(chat_id):
@@ -93,14 +129,13 @@ def webhook():
         send_typing_action(chat_id)
         session = get_chat_session(chat_id)
 
-        # Отправляем "заглушку", которую будем редактировать по мере генерации
+        # Заглушка, которую будем редактировать по мере генерации
         placeholder = send_telegram_message(chat_id, "…")
         message_id = placeholder["result"]["message_id"]
 
         full_text = ""
         last_edit_time = 0
 
-        # Стриминг ответа от Gemini
         response_stream = session.send_message(text, stream=True)
 
         for chunk in response_stream:
@@ -113,8 +148,21 @@ def webhook():
                 last_edit_time = now
                 send_typing_action(chat_id)
 
-        # Финальное обновление — на случай если последний кусочек не попал под интервал
-        edit_telegram_message(chat_id, message_id, full_text)
+        # Финальное обновление с фолбэком на случай битого HTML
+        final_resp = requests.post(
+            f"{TELEGRAM_API_URL}/editMessageText",
+            json={
+                "chat_id": chat_id,
+                "message_id": message_id,
+                "text": format_for_telegram(full_text),
+                "parse_mode": "HTML"
+            }
+        )
+        if not final_resp.json().get("ok"):
+            requests.post(
+                f"{TELEGRAM_API_URL}/editMessageText",
+                json={"chat_id": chat_id, "message_id": message_id, "text": full_text}
+            )
 
     except Exception as e:
         send_telegram_message(chat_id, f"Произошла ошибка: {e}")
