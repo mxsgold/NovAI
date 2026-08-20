@@ -2,6 +2,7 @@ import os
 import re
 import html
 import time
+import threading
 import requests
 from flask import Flask, request, jsonify
 import google.generativeai as genai
@@ -22,32 +23,27 @@ SYSTEM_PROMPT = """
 
 GREETING_MESSAGE = "Привет! Я Ева, твой ИИ-помощник. Чем могу помочь?"
 
-# Имя модели — поставь то, что у тебя реально работает
 MODEL_NAME = "gemini-flash-latest"
 # =========================================================
 
-# Как часто редактировать сообщение во время стриминга (в секундах)
-EDIT_INTERVAL = 0.8
+EDIT_INTERVAL = 0.8       # как часто обновлять текст во время генерации
+DOTS_INTERVAL = 0.3       # как часто крутить анимацию точек (0.1 сек = риск лимитов Telegram, поставил 0.3 для надёжности)
 
 model = genai.GenerativeModel(
     model_name=MODEL_NAME,
     system_instruction=SYSTEM_PROMPT
 )
 
-# История чатов по chat_id (в памяти — сбрасывается при рестарте сервиса)
 chats = {}
 
 
 def format_for_telegram(text):
-    """Конвертирует базовый Markdown от Gemini в HTML-теги, понятные Telegram."""
     text = html.escape(text)
-
     text = re.sub(r"```(.*?)```", r"<pre>\1</pre>", text, flags=re.DOTALL)
     text = re.sub(r"`(.*?)`", r"<code>\1</code>", text)
     text = re.sub(r"\*\*(.*?)\*\*", r"<b>\1</b>", text)
     text = re.sub(r"(?<!\*)\*(?!\*)(.*?)(?<!\*)\*(?!\*)", r"<i>\1</i>", text)
     text = re.sub(r"_(.*?)_", r"<i>\1</i>", text)
-
     return text
 
 
@@ -93,6 +89,16 @@ def send_typing_action(chat_id):
     )
 
 
+def animate_dots(chat_id, message_id, stop_event):
+    """Крутит анимацию . -> .. -> ... -> . по кругу, пока не установлен stop_event."""
+    dots_cycle = [".", "..", "..."]
+    i = 0
+    while not stop_event.is_set():
+        edit_telegram_message(chat_id, message_id, dots_cycle[i % 3])
+        i += 1
+        stop_event.wait(DOTS_INTERVAL)
+
+
 @app.route("/", methods=["GET"])
 def home():
     return jsonify({"status": "ok", "message": "Сервер работает"})
@@ -122,23 +128,43 @@ def webhook():
         send_typing_action(chat_id)
         session = get_chat_session(chat_id)
 
-        placeholder = send_telegram_message(chat_id, "…")
+        placeholder = send_telegram_message(chat_id, ".")
         message_id = placeholder["result"]["message_id"]
+
+        # Запускаем анимацию точек в фоне, пока ждём первый кусок текста
+        stop_event = threading.Event()
+        dots_thread = threading.Thread(
+            target=animate_dots, args=(chat_id, message_id, stop_event)
+        )
+        dots_thread.start()
 
         full_text = ""
         last_edit_time = 0
+        first_chunk_received = False
 
         response_stream = session.send_message(text, stream=True)
 
         for chunk in response_stream:
             if chunk.text:
+                if not first_chunk_received:
+                    # Пришёл первый реальный текст — останавливаем анимацию точек
+                    stop_event.set()
+                    dots_thread.join()
+                    first_chunk_received = True
+                    last_edit_time = 0  # чтобы сразу показать первый кусок текста
+
                 full_text += chunk.text
 
             now = time.time()
-            if now - last_edit_time >= EDIT_INTERVAL:
+            if first_chunk_received and now - last_edit_time >= EDIT_INTERVAL:
                 edit_telegram_message(chat_id, message_id, full_text)
                 last_edit_time = now
                 send_typing_action(chat_id)
+
+        # На случай если ответ пустой или анимация не была остановлена
+        if not stop_event.is_set():
+            stop_event.set()
+            dots_thread.join()
 
     except Exception as e:
         send_telegram_message(chat_id, f"Произошла ошибка: {e}")
